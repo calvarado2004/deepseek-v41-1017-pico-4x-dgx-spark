@@ -46,6 +46,7 @@ _m = collections.Counter()
 _running = 0
 _live = 0        # generated tokens counted so far in requests that are still streaming
 _gen_pub = 0     # the last generation total published: it never goes down
+_pub = collections.Counter()  # the last published draft totals: they never go down either
 _ids = itertools.count(1)
 _inflight = 0
 _USAGE = {key: re.compile(rb'"%s"\s*:\s*(\d+)' % key.encode())
@@ -208,12 +209,21 @@ def metrics_text():
             ("vllm:request_decode_time_seconds_sum", "", _m["decode_sum"]),
             ("vllm:request_decode_time_seconds_count", "", _m["decode_count"]),
         ]
-    drafts = eng
-    if "steps" in drafts:
+    if "steps" in eng:
+        # The engine reports a request's drafts when it ends. While requests stream, add their
+        # live tokens at the ratios of the finished ones (verify steps, drafts verified and
+        # accepted per generated token), so the draft rates move with the generation rate;
+        # the exact totals take over at each request's end. Published totals never go down.
+        done = eng.get("generation", 0)
+        live = max(_live, 0)
+        for key in ("steps", "draft_tokens", "accepted_tokens"):
+            exact = eng.get(key, 0)
+            estimate = exact + (live * exact / done if done else 0)
+            _pub[key] = max(_pub[key], round(estimate))
         rows += [
-            ("vllm:spec_decode_num_drafts_total", "counter", drafts.get("steps", 0)),
-            ("vllm:spec_decode_num_draft_tokens_total", "counter", drafts.get("draft_tokens", 0)),
-            ("vllm:spec_decode_num_accepted_tokens_total", "counter", drafts.get("accepted_tokens", 0)),
+            ("vllm:spec_decode_num_drafts_total", "counter", _pub["steps"]),
+            ("vllm:spec_decode_num_draft_tokens_total", "counter", _pub["draft_tokens"]),
+            ("vllm:spec_decode_num_accepted_tokens_total", "counter", _pub["accepted_tokens"]),
         ]
     out = []
     for name, kind, value in rows:
