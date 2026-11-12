@@ -74,6 +74,16 @@ design; every check above passed with it on, and with it off. Set `PICO_OEA=""` 
   all-reduces a step at 12.3 µs each (about 1 ms of collectives a step), and DSpark drafts that
   a learned gate verifies.
 
+## Patches on top of pico-dgx-ds4
+
+- `0001`: optional per-rank ring device keys in the fleet file (see "Hardware and cabling").
+- `0002`: **sampling fix, needed at the model card's temperature 1.0.** The Gumbel noise's uniform
+  could round to exactly 1.0 in float, which gives one vocabulary entry +inf noise: a uniformly
+  random token in ~0.77% of sampled steps, seen as stray CJK / Arabic / Hebrew characters and
+  unrelated words in long answers. Before: 37 foreign-script runs in 12,000 tokens; after: 0 in
+  17,906 (same prompt, temperature 1.0, top-p 1.0). Greedy decoding (temperature 0) never reaches
+  this code, so greedy benchmarks cannot see it.
+
 ## Hardware and cabling
 
 Four DGX Sparks, ranks 0-3, each cabled to the next with one QSFP cable (rank 3 back to rank 0),
