@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Carlos Alvarado <noreply@example.invalid>
+Date: Wed, 11 Nov 2026 20:13:42 -0500
+Subject: [PATCH] fleet: optional per-rank ring devices (RANK<r>_NEXT_DEV<d>,
+ RANK<r>_PREV_DEV<d>)
+
+A ring whose boxes are not all cabled f0 -> f1 (here rank 1 faces
+its next rank on f0, the other three on f1) needs each box's own device
+names. Absent, the fleet-wide NEXT_DEV<d>/PREV_DEV<d> apply as before.
+---
+ ds41f-4xgx10-switchless/engine/comm/fleet.cpp     |  4 ++++
+ ds41f-4xgx10-switchless/engine/comm/ring.cpp      | 12 ++++++------
+ ds41f-4xgx10-switchless/engine/comm/ring_config.h |  4 ++++
+ ds41f-4xgx10-switchless/engine/server/fleet.sh    |  2 +-
+ 4 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/ds41f-4xgx10-switchless/engine/comm/fleet.cpp b/ds41f-4xgx10-switchless/engine/comm/fleet.cpp
+index c6451b6..590af91 100644
+--- a/ds41f-4xgx10-switchless/engine/comm/fleet.cpp
++++ b/ds41f-4xgx10-switchless/engine/comm/fleet.cpp
+@@ -61,6 +61,8 @@ Fleet read_fleet(const std::string& file) {
+     for (int d = 0; d < kDomains; d++) {
+       keys[p + "NEXT_IP" + std::to_string(d)] = &R.next_ip[d];
+       keys[p + "PREV_IP" + std::to_string(d)] = &R.prev_ip[d];
++      keys[p + "NEXT_DEV" + std::to_string(d)] = &R.next_dev[d];
++      keys[p + "PREV_DEV" + std::to_string(d)] = &R.prev_dev[d];
+     }
+     keys[p + "WEIGHTS"] = &R.weights;
+     keys[p + "HASHMAP"] = &R.hashmap;
+@@ -110,6 +112,8 @@ Fleet read_fleet(const std::string& file) {
+     for (int d = 0; d < kDomains; d++) {
+       need(p + "NEXT_IP" + std::to_string(d), R.next_ip[d]);
+       need(p + "PREV_IP" + std::to_string(d), R.prev_ip[d]);
++      if (R.next_dev[d].empty()) R.next_dev[d] = F.next_dev[d];
++      if (R.prev_dev[d].empty()) R.prev_dev[d] = F.prev_dev[d];
+     }
+     if (R.name.empty()) R.name = "rank " + std::to_string(r);
+     if (!read_batch[r].empty()) {
+diff --git a/ds41f-4xgx10-switchless/engine/comm/ring.cpp b/ds41f-4xgx10-switchless/engine/comm/ring.cpp
+index 2afd734..c0d5b07 100644
+--- a/ds41f-4xgx10-switchless/engine/comm/ring.cpp
++++ b/ds41f-4xgx10-switchless/engine/comm/ring.cpp
+@@ -456,20 +456,20 @@ Ring::Ring(const Options& o) : impl_(new Impl) {
+     std::random_device rd;
+     for (int d = 0; d < kDomains; d++) {
+       const std::string dd = std::to_string(d);
+-      open_link(I.to_next[d], F.next_dev[d].c_str(), F.gid_index, me.next_ip[d], key + "NEXT_IP" + dd, F.file,
++      open_link(I.to_next[d], me.next_dev[d].c_str(), F.gid_index, me.next_ip[d], key + "NEXT_IP" + dd, F.file,
+                 I.region.ptr, I.region.size, rd());
+-      open_link(I.to_prev[d], F.prev_dev[d].c_str(), F.gid_index, me.prev_ip[d], key + "PREV_IP" + dd, F.file,
++      open_link(I.to_prev[d], me.prev_dev[d].c_str(), F.gid_index, me.prev_ip[d], key + "PREV_IP" + dd, F.file,
+                 I.region.ptr, I.region.size, rd());
+       // The opposite rank is reached through the next-facing device: in a switched fleet every peer is on it.
+       if (I.direct)
+-        open_link(I.to_opp[d], F.next_dev[d].c_str(), F.gid_index, me.next_ip[d], key + "NEXT_IP" + dd, F.file,
++        open_link(I.to_opp[d], me.next_dev[d].c_str(), F.gid_index, me.next_ip[d], key + "NEXT_IP" + dd, F.file,
+                   I.region.ptr, I.region.size, rd());
+     }
+     I.bootstrap();
+     for (int d = 0; d < kDomains; d++) {
+-      connect_link(I.to_next[d], F.next_dev[d].c_str(), F.gid_index);
+-      connect_link(I.to_prev[d], F.prev_dev[d].c_str(), F.gid_index);
+-      if (I.direct) connect_link(I.to_opp[d], F.next_dev[d].c_str(), F.gid_index);
++      connect_link(I.to_next[d], me.next_dev[d].c_str(), F.gid_index);
++      connect_link(I.to_prev[d], me.prev_dev[d].c_str(), F.gid_index);
++      if (I.direct) connect_link(I.to_opp[d], me.next_dev[d].c_str(), F.gid_index);
+     }
+   }
+   CUDA_CHECK(cudaMalloc(&I.d_seq, 2 * sizeof(unsigned long long)));
+diff --git a/ds41f-4xgx10-switchless/engine/comm/ring_config.h b/ds41f-4xgx10-switchless/engine/comm/ring_config.h
+index 4e71565..a902115 100644
+--- a/ds41f-4xgx10-switchless/engine/comm/ring_config.h
++++ b/ds41f-4xgx10-switchless/engine/comm/ring_config.h
+@@ -19,6 +19,10 @@ struct RankAddr {
+   std::string ssh;                 // RANK<r>_SSH: how rank 0's scripts reach it (unused by the engine)
+   std::string next_ip[kDomains];   // RANK<r>_NEXT_IP<d>: this rank's address on the link to rank+1
+   std::string prev_ip[kDomains];   // RANK<r>_PREV_IP<d>: this rank's address on the link to rank-1
++  // RANK<r>_NEXT_DEV<d>, RANK<r>_PREV_DEV<d> (optional): this box's devices facing rank+1 and rank-1,
++  // for a ring whose boxes are not all cabled f0 -> f1; absent, the fleet-wide NEXT_DEV<d>/PREV_DEV<d>.
++  std::string next_dev[kDomains];
++  std::string prev_dev[kDomains];
+   // RANK<r>_WEIGHTS, _HASHMAP, _ENGRAM (the shards' directory), _SPILL, as written (fleet_path expands
+   // them: {rank}, ~/)
+   std::string weights, hashmap, engram, spill;
+diff --git a/ds41f-4xgx10-switchless/engine/server/fleet.sh b/ds41f-4xgx10-switchless/engine/server/fleet.sh
+index d66da4c..0634ca5 100644
+--- a/ds41f-4xgx10-switchless/engine/server/fleet.sh
++++ b/ds41f-4xgx10-switchless/engine/server/fleet.sh
+@@ -9,7 +9,7 @@ FLEET=${FLEET:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/fleet/homelab
+ fleet_load() {
+   local f=$1 line n=0 key val k v
+   local skip='^[[:blank:]]*(#.*)?$' re='^([A-Z][A-Z0-9_]*)=([A-Za-z0-9._/~:,@+%{}-]*)([[:blank:]]+(#.*)?)?$'
+-  local known='^(GID_INDEX|NEXT_DEV[01]|PREV_DEV[01]|BIN_DIR|LOG_DIR|SERVICE_DIR|RING_LOCK|RANK[0-3]_(NAME|HOSTNAME|SSH|NEXT_IP[01]|PREV_IP[01]|WEIGHTS|HASHMAP|ENGRAM|ENGRAM_READ_BATCH|SPILL))$'
++  local known='^(GID_INDEX|NEXT_DEV[01]|PREV_DEV[01]|BIN_DIR|LOG_DIR|SERVICE_DIR|RING_LOCK|RANK[0-3]_(NAME|HOSTNAME|SSH|NEXT_IP[01]|PREV_IP[01]|NEXT_DEV[01]|PREV_DEV[01]|WEIGHTS|HASHMAP|ENGRAM|ENGRAM_READ_BATCH|SPILL))$'
+   local -A seen=()
+   if [ ! -r "$f" ] || [ -d "$f" ]; then
+     echo "fleet: cannot read the fleet file $f (FLEET=FILE)" >&2
+-- 
+2.54.0 (Apple Git-157)
+

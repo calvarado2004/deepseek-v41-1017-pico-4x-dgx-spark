@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Run one rank of DeepSeek-V4.1-Flash-1017 on pico-dgx-ds4 (github.com/Picom-code/pico-dgx-ds4) at TP=4:
+#
+#   rank 0 -> rank 1 -> rank 2 -> rank 3 -> rank 0 (fleet/ring.conf)
+#
+# The engine's own scripts (engine/server/service.sh) start ranks 1-3 over ssh from a supervisor
+# on rank 0. Here one systemd unit holds one rank and the journal holds its log, as for the other
+# cards; the arguments are service.sh's (--mode serve --disk-tag service --keep-gib, then
+# PICO_ENGINE_ARGS). The fleet file (engine/fleet.conf) names each rank's devices, fabric
+# addresses, rank file and Engram shards. Rank 0 also runs dsfront (OpenAI API on
+# 127.0.0.1:PICO_HTTP_PORT) and the TLS front on :8888.
+set -euo pipefail
+if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^[0-3]$ ]]; then
+  echo "usage: $0 <node-rank: 0..3>" >&2; exit 2
+fi
+R="$1"
+ROOT="${PICO_RUNTIME_ROOT:-/opt/spark-llm/profiles/deepseek-v41-1017-pico}"
+E="$ROOT/engine"
+RUN="${RUNTIME_DIRECTORY:-/run/spark-llm-pico}"
+SOCK="$RUN/engine.sock"
+PORT=8888 HTTP_PORT="${PICO_HTTP_PORT:-18893}"
+# The name in the TLS certificate that rank 0 serves on :8888 (the readiness probe uses it).
+API_HOST="${PICO_API_HOST:?PICO_API_HOST unset (stage.sh writes it from cluster.env)}"
+MODEL="${PICO_SERVED_MODEL_NAME:-DeepSeek-V4.1-Flash-1017-Pico}"
+KEY_FILE="${PICO_KEY_FILE:-/etc/spark-llm/profiles/deepseek-v41-1017-pico.key}"
+for f in "$E/dsgb10_rank" "$E/fleet.conf" "$E/cfmlp_cml.bin"; do
+  [ -f "$f" ] || { echo "missing $f (stage.sh)" >&2; exit 1; }
+done
+# shellcheck disable=SC2206
+args=(--rank "$R" --fleet "$E/fleet.conf" --mode serve --socket "$SOCK" --disk-tag service
+      --keep-gib "${PICO_KEEP_GIB:-4}" ${PICO_ENGINE_ARGS:-} ${PICO_OEA:-})
+echo "pico rank $R: ${args[*]}"
+
+if [ "$R" != 0 ]; then
+  "$E/dsgb10_rank" "${args[@]}" < /dev/null &
+  rank_pid=$!
+  sleep 2
+  kill -0 "$rank_pid" 2>/dev/null && [ -n "${NOTIFY_SOCKET:-}" ] \
+    && systemd-notify --ready --status="rank $R, waiting for or joined to rank 0"
+  status=0; wait "$rank_pid" || status=$?
+  echo "pico rank $R exited with status $status"; exit "$status"
+fi
+
+[ -f "$E/dsfront" ] && [ -r "$KEY_FILE" ] || { echo "missing $E/dsfront or $KEY_FILE (stage.sh)" >&2; exit 1; }
+KEY="$(tr -d '\r\n' < "$KEY_FILE")"
+# Images: their encoder (tools/vision/vision_encoder.py: the checkpoint's own ViT + aligner) as a side
+# process on rank 0, ~1.2 GB of GPU memory, in the vLLM image (torch + PIL + safetensors). It loads
+# BEFORE the engine: on a GPU that the engine keeps busy its weight copy spins a CPU core for
+# minutes (2026-11-12: >4 min at 100% in cuMemcpyHtoDAsync); on an idle GPU it is quick. Video: the TLS front turns each video into
+# timed frames (bin/dsv41_video_frames.py), which reach dsfront as image parts (16 at most a request).
+VISION="${PICO_VISION:-0}" VISION_PORT="${PICO_VISION_PORT:-18950}"
+vision_args=()
+[ "$VISION" = 1 ] && vision_args=(--vision-addr "127.0.0.1:$VISION_PORT")
+start_vision() {
+  docker rm -f pico-vision >/dev/null 2>&1 || true
+  docker run -d --rm --name pico-vision --gpus all --net=host --memory=6g -e VISION_PRELOAD=1 \
+    -v "${PICO_CKPT:-/srv/spark-llm/models/deepseek-v41-1017-official}:/model:ro" -v "$ROOT/vision:/app:ro" \
+    --entrypoint python3 "${PICO_VISION_IMAGE:-vllm/vllm-openai:v0.32.0}" \
+    /app/vision_encoder.py --host 127.0.0.1 --port "$VISION_PORT" > /dev/null \
+    || { echo "pico vision encoder FAILED to start; image requests answer 503"; return 0; }
+  local t0=$SECONDS
+  until docker logs pico-vision 2>&1 | grep -q "listening on"; do
+    docker inspect -f '{{.State.Running}}' pico-vision 2>/dev/null | grep -q true \
+      || { echo "pico vision encoder exited while loading; image requests answer 503"; return 0; }
+    [ $((SECONDS - t0)) -lt "${PICO_VISION_LOAD_TIMEOUT:-300}" ] \
+      || { echo "pico vision encoder not listening after ${PICO_VISION_LOAD_TIMEOUT:-300}s; continuing without it"; return 0; }
+    [ -n "${NOTIFY_SOCKET:-}" ] && systemd-notify --status="loading the image encoder"
+    sleep 2
+  done
+  echo "pico vision encoder listening on 127.0.0.1:$VISION_PORT after $((SECONDS - t0)) s"
+}
+[ "$VISION" = 1 ] && start_vision
+rm -f "$SOCK"
+# The engine's output goes through bin/draft-meter.py: the journal gets every line, and
+# $RUN/drafts.json the DSpark draft totals that the TLS front serves on /metrics.
+"$E/dsgb10_rank" "${args[@]}" < /dev/null > >(python3 -I "$ROOT/bin/draft-meter.py" "$RUN/drafts.json") 2>&1 &
+rank_pid=$!
+# shellcheck disable=SC2206
+"$E/dsfront" serve --listen "127.0.0.1:$HTTP_PORT" --engine-socket "$SOCK" --api-key-file "$KEY_FILE" \
+  --admin-socket "$RUN/front.admin" --hold-s 600 --table-file "${PICO_STATE_DIR:-$HOME/pico-card}/front.table" \
+  --tokenizer "$E/tokenizer.json" --model-name "$MODEL" ${PICO_FRONT_ARGS:-} "${vision_args[@]}" < /dev/null &
+front_pid=$!
+TLS_FRONT_DRAFTS="$RUN/drafts.json" TLS_FRONT_CERT="${PICO_TLS_CERT:?}" TLS_FRONT_KEY="${PICO_TLS_KEY:?}" DSV41_VIDEO_MAX_IMAGES=16 TLS_FRONT_UPSTREAM="127.0.0.1:$HTTP_PORT" TLS_FRONT_METRICS=1 TLS_FRONT_MODEL="$MODEL" python3 -I "$ROOT/bin/tls-front.py" &
+tls_pid=$!
+trap 'kill "$front_pid" "$tls_pid" 2>/dev/null || true; [ "$VISION" = 1 ] && docker rm -f pico-vision >/dev/null 2>&1 || true' EXIT
+
+(
+  deadline=$(( $(date +%s) + ${PICO_READY_TIMEOUT:-840} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    kill -0 "$rank_pid" 2>/dev/null || exit 0
+    # dsfront's /health: 200 "ok" once the engine is connected, 503 before.
+    if curl -sk -m 5 -f -o /dev/null "https://$API_HOST:$PORT/health" 2>/dev/null; then
+      body="{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Count from 1 to 20.\"}],\"max_tokens\":32,\"chat_template_kwargs\":{\"thinking\":false}}"
+      curl -sk -m 300 -o /dev/null -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$body" \
+        "https://$API_HOST:$PORT/v1/chat/completions" || true
+      kill -0 "$rank_pid" 2>/dev/null || exit 0
+      [ -n "${NOTIFY_SOCKET:-}" ] && systemd-notify --ready --status="serving on :$PORT"
+      exit 0
+    fi
+    [ -n "${NOTIFY_SOCKET:-}" ] && systemd-notify --status="loading (rank 0)"
+    sleep 3
+  done
+  [ -n "${NOTIFY_SOCKET:-}" ] && systemd-notify --status="not ready after ${PICO_READY_TIMEOUT:-840}s"
+) &
+
+status=0; wait "$rank_pid" || status=$?
+echo "pico rank 0 exited with status $status"; exit "$status"

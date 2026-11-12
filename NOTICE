@@ -1,0 +1,23 @@
+DeepSeek-V4.1-Flash-1017 on pico-dgx-ds4, four DGX Sparks
+Copyright (c) 2026 Carlos Alvarado Martinez — MIT, see LICENSE.
+
+The engine is not in this repository. scripts/build.sh fetches and builds it:
+
+- Picom-code/pico-dgx-ds4 (MIT) at the commit in pins.env: Patrick Moorhead's fork of
+  blaesus/dsgx10 (MIT, Andy Shu), the C++/CUDA engine, front-end (dsfront), weight
+  converter, ring collectives, DSpark drafter, image encoder (tools/vision) and the
+  verify-gate weights (tools/stack4/cfmlp_cml.bin) that this recipe serves.
+
+This repository includes:
+
+- patches/0001: a change to pico-dgx-ds4 (MIT, like the code it changes): optional
+  per-rank ring device keys in the fleet file.
+- bin/tls-front.py, bin/dsv41_video_frames.py: from calvarado2004/deepseek-v41-1017-nvfp4-nvidia-flare
+  and calvarado2004/deepseek-v41-1017-nvfp4 (MIT, same author); the TLS front here adds a
+  vLLM-shaped /metrics.
+- assets/deepseek-logo.svg: from Wikimedia Commons, MIT, originally published by
+  deepseek-ai. The logo is a trademark of DeepSeek.
+
+Not included, fetched by the scripts: the checkpoint deepseek-ai/DeepSeek-V4.1-Flash-1017
+(under its own model license) and the container image vllm/vllm-openai:v0.32.0 (Apache-2.0),
+used only as the image encoder's PyTorch runtime.

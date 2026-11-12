@@ -1,0 +1,33 @@
+[Unit]
+Description=pico-dgx-ds4 DeepSeek-V4.1-Flash-1017, TP=4 on the four-Spark ring (node rank %i of 4) on DGX Spark
+After=network-online.target
+Wants=network-online.target
+Conflicts=spark-llm-dsv41-flare@%i.service
+StartLimitBurst=0
+
+[Service]
+# notify: rank 0 holds "activating" until :8888/health answers and a warm request is done;
+# ranks 1-3 report ready once their rank runs (they wait up to 600 s for rank 0's handshake).
+Type=notify
+NotifyAccess=all
+User=@SPARK_USER@
+Group=@SPARK_USER@
+WorkingDirectory=/opt/spark-llm/profiles/deepseek-v41-1017-pico
+Environment=HOME=@SPARK_HOME@
+EnvironmentFile=-/etc/spark-llm/profiles/deepseek-v41-1017-pico.env
+# The ring registers pinned memory with ibv_reg_mr: the default 8 MiB limit fails it.
+LimitMEMLOCK=infinity
+RuntimeDirectory=spark-llm-pico
+# A rank needs ~90 GiB; GB10 allocations need MemFree: drop clean page cache first.
+ExecStartPre=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+# Rank 0's image encoder container (bin/launch-rank), also after a hard stop.
+ExecStopPost=-/usr/bin/docker rm -f pico-vision
+ExecStart=/opt/spark-llm/profiles/deepseek-v41-1017-pico/bin/launch-rank %i
+
+TimeoutStartSec=900
+WatchdogSec=0
+TimeoutStopSec=90
+KillMode=control-group
+
+# NO [Install] SECTION, DELIBERATELY: an inference unit must never be enabled
+# or start at boot.

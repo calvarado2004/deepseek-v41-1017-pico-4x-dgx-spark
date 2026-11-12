@@ -1,0 +1,76 @@
+# EXAMPLE: the four-Spark ring of this recipe's author, for pico-dgx-ds4 (engine/server/fleet.sh format; see their fleet/homelab.conf).
+# Copy to fleet/ring.conf and give every key your values (ibv_devices, ip -4 addr, GIDs: see README).
+# Ring: rank 0 -> rank 1 -> rank 2 -> rank 3 -> rank 0.
+# Cabling here: rank0 p1-rank1 p1, rank1 p0-rank2 p0, rank2 p1-rank3 p0, rank3 p1-rank0 p0.
+# So three boxes face the next rank on f1 and rank 1 on f0: the per-rank *_DEV keys come from patch 0001.
+# GID 3 = the IPv4 RoCE v2 GID on every device. Domain 0 = rocep1s0f*, domain 1 = roceP2p1s0f*.
+
+NEXT_DEV0=rocep1s0f1
+NEXT_DEV1=roceP2p1s0f1
+PREV_DEV0=rocep1s0f0
+PREV_DEV1=roceP2p1s0f0
+GID_INDEX=3
+
+BIN_DIR=~/pico-card/bin
+LOG_DIR=~/pico-card/logs
+SERVICE_DIR=~/pico-card/service
+RING_LOCK=/home/spark/pico-card/ring.lock
+
+# Rank 0: spark-0 (next rank 1 on .100/.102, prev rank 3 on .101/.103)
+RANK0_NAME=spark-0
+RANK0_HOSTNAME=spark-0
+RANK0_NEXT_IP0=192.168.100.10
+RANK0_NEXT_IP1=192.168.102.10
+RANK0_PREV_IP0=192.168.101.10
+RANK0_PREV_IP1=192.168.103.10
+RANK0_WEIGHTS=/srv/spark-llm/models/deepseek-v41-1017-pico/rank0.dsw
+RANK0_HASHMAP=/srv/spark-llm/models/deepseek-v41-1017-pico/engram/engram_hashmap.bin
+RANK0_ENGRAM=/srv/spark-llm/models/deepseek-v41-1017-pico/engram
+RANK0_ENGRAM_READ_BATCH=8
+RANK0_SPILL=~/pico-card/spill
+
+# Rank 1: spark-1 (next rank 2 on .104/.105 via f0, prev rank 0 on .100/.102 via f1)
+RANK1_NAME=spark-1
+RANK1_HOSTNAME=spark-1
+RANK1_SSH=192.168.100.11
+RANK1_NEXT_DEV0=rocep1s0f0
+RANK1_NEXT_DEV1=roceP2p1s0f0
+RANK1_PREV_DEV0=rocep1s0f1
+RANK1_PREV_DEV1=roceP2p1s0f1
+RANK1_NEXT_IP0=192.168.104.11
+RANK1_NEXT_IP1=192.168.105.11
+RANK1_PREV_IP0=192.168.100.11
+RANK1_PREV_IP1=192.168.102.11
+RANK1_WEIGHTS=/srv/spark-llm/models/deepseek-v41-1017-pico/rank1.dsw
+RANK1_HASHMAP=/srv/spark-llm/models/deepseek-v41-1017-pico/engram/engram_hashmap.bin
+RANK1_ENGRAM=/srv/spark-llm/models/deepseek-v41-1017-pico/engram
+RANK1_ENGRAM_READ_BATCH=8
+RANK1_SPILL=~/pico-card/spill
+
+# Rank 2: spark-2 (next rank 3 on .106/.107, prev rank 1 on .104/.105); SSH routed via a neighbour
+RANK2_NAME=spark-2
+RANK2_HOSTNAME=spark-2
+RANK2_SSH=192.168.104.13
+RANK2_NEXT_IP0=192.168.106.13
+RANK2_NEXT_IP1=192.168.107.13
+RANK2_PREV_IP0=192.168.104.13
+RANK2_PREV_IP1=192.168.105.13
+RANK2_WEIGHTS=/srv/spark-llm/models/deepseek-v41-1017-pico/rank2.dsw
+RANK2_HASHMAP=/srv/spark-llm/models/deepseek-v41-1017-pico/engram/engram_hashmap.bin
+RANK2_ENGRAM=/srv/spark-llm/models/deepseek-v41-1017-pico/engram
+RANK2_ENGRAM_READ_BATCH=8
+RANK2_SPILL=~/pico-card/spill
+
+# Rank 3: spark-3 (next rank 0 on .101/.103, prev rank 2 on .106/.107)
+RANK3_NAME=spark-3
+RANK3_HOSTNAME=spark-3
+RANK3_SSH=192.168.101.12
+RANK3_NEXT_IP0=192.168.101.12
+RANK3_NEXT_IP1=192.168.103.12
+RANK3_PREV_IP0=192.168.106.12
+RANK3_PREV_IP1=192.168.107.12
+RANK3_WEIGHTS=/srv/spark-llm/models/deepseek-v41-1017-pico/rank3.dsw
+RANK3_HASHMAP=/srv/spark-llm/models/deepseek-v41-1017-pico/engram/engram_hashmap.bin
+RANK3_ENGRAM=/srv/spark-llm/models/deepseek-v41-1017-pico/engram
+RANK3_ENGRAM_READ_BATCH=8
+RANK3_SPILL=~/pico-card/spill
